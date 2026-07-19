@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-IntraMirror License System - Termux Compatible
-Fixes: "cmd: Failure" error for android_id
+IntraMirror OTP Sender - Auto-Check License System
+Checks Pastebin automatically for approval
 """
 
 import hashlib
@@ -12,8 +12,7 @@ import platform
 import requests
 from datetime import datetime, timedelta
 import sys
-import re
-import uuid
+import time
 
 class Colors:
     GREEN = '\033[92m'
@@ -27,7 +26,7 @@ class Colors:
     BOLD = '\033[1m'
     DIM = '\033[2m'
 
-class PastebinLicenseManager:
+class AutoLicenseManager:
     def __init__(self, secret_word="naha"):
         """
         Initialize with Pastebin URL
@@ -43,26 +42,21 @@ class PastebinLicenseManager:
         
         self.load_license()
     
-    def get_device_id_termux(self):
+    def get_device_id(self):
         """
         Get unique device ID for Termux/Android
-        
-        Multiple fallback methods for maximum compatibility
+        Multiple fallback methods
         """
-        
-        # ===== METHOD 1: Try Android ID (with different approach) =====
+        # Method 1: Try Android ID via content provider
         try:
-            # Try using content provider directly
             result = subprocess.run(
                 ['content', 'query', '--uri', 'content://settings/secure', 
                  '--where', "name='android_id'"],
                 capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
-                output = result.stdout
-                # Parse output to find android_id
                 import re
-                match = re.search(r'value=([a-f0-9]+)', output)
+                match = re.search(r'value=([a-f0-9]+)', result.stdout)
                 if match:
                     android_id = match.group(1)
                     if android_id and len(android_id) > 5:
@@ -70,7 +64,7 @@ class PastebinLicenseManager:
         except:
             pass
         
-        # ===== METHOD 2: Use build.prop =====
+        # Method 2: Use build fingerprint
         try:
             result = subprocess.run(
                 ['getprop', 'ro.build.fingerprint'],
@@ -78,12 +72,11 @@ class PastebinLicenseManager:
             )
             fingerprint = result.stdout.strip()
             if fingerprint and len(fingerprint) > 10:
-                # Hash the fingerprint to get consistent ID
                 return f"FINGERPRINT:{hashlib.md5(fingerprint.encode()).hexdigest()[:16]}"
         except:
             pass
         
-        # ===== METHOD 3: Use serial number =====
+        # Method 3: Use serial number
         try:
             result = subprocess.run(
                 ['getprop', 'ro.serialno'],
@@ -95,55 +88,20 @@ class PastebinLicenseManager:
         except:
             pass
         
-        # ===== METHOD 4: Use installation path + username =====
+        # Method 4: Fallback - Use system info
         try:
-            import pwd
-            username = pwd.getpwuid(os.getuid()).pw_name
-        except:
-            username = os.getenv('USER', 'termux')
-        
-        # Get termux installation path
-        home = os.path.expanduser("~")
-        
-        # Get some stable system info
-        try:
-            hostname = platform.node()
-        except:
-            hostname = "unknown"
-        
-        # Combine multiple factors
-        unique_string = f"{username}|{home}|{hostname}|{datetime.now().year}"
-        device_id = hashlib.sha256(unique_string.encode()).hexdigest()[:16]
-        
-        return f"TERMUX:{device_id}"
-    
-    def get_device_id(self):
-        """
-        Get device ID with Termux compatibility
-        """
-        try:
-            # Try Termux-specific method first
-            device_id = self.get_device_id_termux()
-            if device_id:
-                return device_id
-        except:
-            pass
-        
-        # Ultimate fallback
-        try:
-            # Use a combination of system info
             import socket
-            unique = f"{platform.node()}{os.path.expanduser('~')}{socket.gethostname()}"
+            username = os.getenv('USER', 'termux')
+            hostname = platform.node()
+            home = os.path.expanduser("~")
+            unique = f"{username}|{home}|{hostname}|{datetime.now().year}"
             return f"FALLBACK:{hashlib.md5(unique.encode()).hexdigest()[:16]}"
         except:
-            return f"FALLBACK:{hashlib.md5(str(uuid.getnode()).encode()).hexdigest()[:16]}"
+            return f"FALLBACK:{hashlib.md5(str(os.getpid()).encode()).hexdigest()[:16]}"
     
     def get_device_model(self):
-        """
-        Get device model for Termux
-        """
+        """Get device model"""
         try:
-            # Try build model
             result = subprocess.run(
                 ['getprop', 'ro.product.model'],
                 capture_output=True, text=True, timeout=5
@@ -155,32 +113,26 @@ class PastebinLicenseManager:
             pass
         
         try:
-            # Try manufacturer + model
             result = subprocess.run(
                 ['getprop', 'ro.product.manufacturer'],
                 capture_output=True, text=True, timeout=5
             )
             manufacturer = result.stdout.strip()
-            
             result = subprocess.run(
                 ['getprop', 'ro.product.model'],
                 capture_output=True, text=True, timeout=5
             )
             model = result.stdout.strip()
-            
             if manufacturer and model:
                 return f"{manufacturer} {model}"
         except:
             pass
         
-        # Fallback
         return platform.node() or "Termux_Device"
     
     def generate_request_code(self):
         """
-        Generate request code for approval
-        
-        Formula: SHA256(Device_ID + Device_Model + Secret_Word + Timestamp)
+        Generate request code from device info
         """
         device_id = self.get_device_id()
         device_model = self.get_device_model()
@@ -190,7 +142,6 @@ class PastebinLicenseManager:
         hash_obj = hashlib.sha256(raw_data.encode())
         hash_hex = hash_obj.hexdigest()
         
-        # Take first 12 chars for request code
         request_code = f"REQ-{hash_hex[:12].upper()}"
         
         return {
@@ -200,37 +151,33 @@ class PastebinLicenseManager:
             "timestamp": timestamp
         }
     
-    def check_pastebin_approval(self, request_code):
+    def check_pastebin(self, request_code):
         """
         Check if request code exists in Pastebin
         
-        Format in Pastebin:
-        REQ-XXXX-XXXX|APP-XXXX-XXXX|2024-03-15|user@email.com
+        Returns:
+            dict: Approval data or None
         """
         try:
-            # Fetch from Pastebin
             response = requests.get(self.pastebin_url, timeout=10)
             
             if response.status_code != 200:
-                print(f"{Colors.YELLOW}⚠️ Could not reach Pastebin (Status: {response.status_code}){Colors.RESET}")
                 return None
             
             content = response.text.strip()
             
             if not content:
-                print(f"{Colors.YELLOW}⚠️ Pastebin content is empty{Colors.RESET}")
                 return None
             
-            # Check if content is JSON
+            # Try JSON format
             try:
                 data = json.loads(content)
-                # JSON format
                 approved_devices = data.get("approved_devices", {})
                 for key, approval in approved_devices.items():
                     if approval.get("request_code") == request_code:
                         return approval
             except:
-                # Plain text format
+                # Try plain text format
                 lines = content.strip().split('\n')
                 for line in lines:
                     line = line.strip()
@@ -248,49 +195,65 @@ class PastebinLicenseManager:
             
             return None
             
-        except requests.exceptions.Timeout:
-            print(f"{Colors.YELLOW}⚠️ Connection timeout to Pastebin{Colors.RESET}")
-            return None
-        except requests.exceptions.ConnectionError:
-            print(f"{Colors.YELLOW}⚠️ Cannot connect to Pastebin (Check internet){Colors.RESET}")
-            return None
         except Exception as e:
-            print(f"{Colors.YELLOW}⚠️ Error checking Pastebin: {e}{Colors.RESET}")
             return None
     
-    def generate_approval_code(self, request_code):
+    def check_license(self):
         """
-        Generate approval code from request code
+        Check license status - AUTO APPROVAL
         
-        NOTE: This is for ADMIN use only - not in user's tool
+        Returns:
+            dict: License status
         """
-        timestamp = datetime.now().strftime("%Y%m%d")
-        raw_data = f"{request_code}|{self.secret_word}|{timestamp}"
-        hash_obj = hashlib.sha256(raw_data.encode())
-        hash_hex = hash_obj.hexdigest()
+        # Generate request code for this device
+        request_info = self.generate_request_code()
+        request_code = request_info["request_code"]
         
-        approval_code = f"APP-{hash_hex[:12].upper()}"
-        return approval_code
-    
-    def validate_approval(self, request_code, approval_code):
-        """
-        Validate approval code against Pastebin
-        """
+        # Check if already have local license
+        if self.license_data and self.license_data.get("status") == "active":
+            # Verify device matches
+            if self.license_data.get("device_id") == request_info["device_id"]:
+                # Check expiry
+                expiry = self.license_data.get("expiry_date")
+                if expiry:
+                    try:
+                        expiry_date = datetime.fromisoformat(expiry)
+                        if datetime.now() > expiry_date:
+                            return {
+                                "status": "expired",
+                                "message": f"License expired on {expiry}",
+                                "request_code": request_code,
+                                "device_id": request_info["device_id"],
+                                "device_model": request_info["device_model"]
+                            }
+                        remaining = (expiry_date - datetime.now()).days
+                    except:
+                        remaining = None
+                else:
+                    remaining = None
+                
+                return {
+                    "status": "active",
+                    "message": "License valid (cached)",
+                    "request_code": request_code,
+                    "device_id": request_info["device_id"],
+                    "device_model": request_info["device_model"],
+                    "remaining_days": remaining,
+                    "expiry_date": expiry,
+                    "user_info": self.license_data.get("user_info")
+                }
+        
         # Check Pastebin for approval
-        approval_data = self.check_pastebin_approval(request_code)
+        print(f"\n{Colors.DIM}🔍 Checking approval status...{Colors.RESET}")
+        approval_data = self.check_pastebin(request_code)
         
         if not approval_data:
             return {
-                "status": "error",
-                "message": "❌ Not approved! Contact admin."
-            }
-        
-        # Check approval code matches
-        expected_approval = approval_data.get("approval_code")
-        if not expected_approval or approval_code != expected_approval:
-            return {
-                "status": "error",
-                "message": "❌ Invalid approval code"
+                "status": "denied",
+                "message": "❌ Not approved! Contact admin.",
+                "request_code": request_code,
+                "device_id": request_info["device_id"],
+                "device_model": request_info["device_model"]
             }
         
         # Check expiry
@@ -300,30 +263,41 @@ class PastebinLicenseManager:
                 expiry = datetime.fromisoformat(expiry_date)
                 if datetime.now() > expiry:
                     return {
-                        "status": "error",
-                        "message": f"❌ License expired on {expiry_date}"
+                        "status": "expired",
+                        "message": f"❌ License expired on {expiry_date}",
+                        "request_code": request_code,
+                        "device_id": request_info["device_id"],
+                        "device_model": request_info["device_model"],
+                        "expiry_date": expiry_date
                     }
+                remaining = (expiry - datetime.now()).days
             except:
-                pass
+                remaining = None
+        else:
+            remaining = None
         
-        # Save license
+        # ✅ APPROVED!
+        # Save license locally
         license_data = {
             "request_code": request_code,
-            "approval_code": approval_code,
-            "device_id": self.get_device_id(),
-            "device_model": self.get_device_model(),
+            "device_id": request_info["device_id"],
+            "device_model": request_info["device_model"],
             "activated_date": datetime.now().isoformat(),
             "expiry_date": expiry_date,
             "status": "active",
             "user_info": approval_data.get("user_info", "Unknown")
         }
-        
         self.save_license(license_data)
         
         return {
-            "status": "success",
-            "message": "✅ License activated successfully!",
-            "data": license_data
+            "status": "active",
+            "message": "✅ License approved!",
+            "request_code": request_code,
+            "device_id": request_info["device_id"],
+            "device_model": request_info["device_model"],
+            "remaining_days": remaining,
+            "expiry_date": expiry_date,
+            "user_info": approval_data.get("user_info", "Unknown")
         }
     
     def save_license(self, license_data):
@@ -331,13 +305,12 @@ class PastebinLicenseManager:
         try:
             with open(self.license_file, 'w') as f:
                 json.dump(license_data, f, indent=2)
-            # Set permissions (if possible)
             try:
                 os.chmod(self.license_file, 0o600)
             except:
                 pass
-        except Exception as e:
-            print(f"Warning: Could not save license: {e}")
+        except:
+            pass
     
     def load_license(self):
         """Load existing license"""
@@ -352,121 +325,54 @@ class PastebinLicenseManager:
         self.license_data = None
         return None
     
-    def check_license(self):
+    def get_license_status(self):
         """
-        Check if license is valid
+        Get license status for display
         """
-        if not self.license_data:
-            self.load_license()
+        result = self.check_license()
         
-        if not self.license_data:
-            return {
-                "status": "not_activated",
-                "message": "No license found."
-            }
-        
-        if self.license_data.get("status") != "active":
-            return {
-                "status": "error",
-                "message": "License not active"
-            }
-        
-        # Check device
-        device_id = self.get_device_id()
-        if self.license_data.get("device_id") != device_id:
-            return {
-                "status": "error",
-                "message": "License for different device"
-            }
-        
-        # Check expiry
-        expiry = self.license_data.get("expiry_date")
-        if expiry:
-            try:
-                expiry_date = datetime.fromisoformat(expiry)
-                if datetime.now() > expiry_date:
-                    self.license_data["status"] = "expired"
-                    self.save_license(self.license_data)
-                    return {
-                        "status": "expired",
-                        "message": f"License expired on {expiry}"
-                    }
-                remaining = (expiry_date - datetime.now()).days
-            except:
-                remaining = None
-        else:
-            remaining = None
-        
-        return {
-            "status": "success",
-            "message": "License valid",
-            "remaining_days": remaining,
-            "expiry_date": expiry,
-            "user_info": self.license_data.get("user_info")
-        }
+        return result
     
-    def request_approval_flow(self):
+    def display_status(self):
         """
-        Complete approval flow for user
+        Display license status to user
         """
+        status = self.get_license_status()
+        
         print("\n" + "="*60)
-        print(f"{Colors.CYAN}{Colors.BOLD}  🔐 IntraMirror License - Activation{Colors.RESET}")
+        print(f"{Colors.CYAN}{Colors.BOLD}  🔐 License Status{Colors.RESET}")
         print("="*60)
         
-        # Check existing license
-        license_status = self.check_license()
-        if license_status["status"] == "success":
-            print(f"\n{Colors.GREEN}✅ License already active!{Colors.RESET}")
-            print(f"{Colors.DIM}User: {license_status.get('user_info', 'Unknown')}{Colors.RESET}")
-            if license_status.get("remaining_days") is not None:
-                print(f"⏰ Remaining: {license_status['remaining_days']} days")
-            if license_status.get("expiry_date"):
-                print(f"📅 Expires: {license_status['expiry_date']}")
+        if status["status"] == "active":
+            print(f"\n{Colors.GREEN}✅ {status['message']}{Colors.RESET}")
+            print(f"  🆔 Device: {status.get('device_model', 'Unknown')}")
+            print(f"  🔑 Request: {status.get('request_code', 'Unknown')}")
+            if status.get("remaining_days") is not None:
+                print(f"  ⏰ Remaining: {status['remaining_days']} days")
+            if status.get("expiry_date"):
+                print(f"  📅 Expires: {status['expiry_date']}")
+            if status.get("user_info"):
+                print(f"  👤 User: {status['user_info']}")
             return True
-        
-        if license_status["status"] == "expired":
-            print(f"\n{Colors.RED}❌ License expired on {license_status.get('expiry_date')}{Colors.RESET}")
-            print(f"{Colors.YELLOW}Please contact admin for extension.{Colors.RESET}")
+            
+        elif status["status"] == "expired":
+            print(f"\n{Colors.RED}❌ {status['message']}{Colors.RESET}")
+            print(f"  🆔 Device: {status.get('device_model', 'Unknown')}")
+            print(f"  🔑 Request: {status.get('request_code', 'Unknown')}")
+            print(f"\n{Colors.YELLOW}💡 Contact admin for extension{Colors.RESET}")
             return False
-        
-        # Generate request code
-        request_info = self.generate_request_code()
-        request_code = request_info["request_code"]
-        
-        print(f"\n{Colors.YELLOW}📋 Step 1: Get Your Request Code{Colors.RESET}")
-        print(f"{Colors.DIM}Device Information:{Colors.RESET}")
-        print(f"  📱 Model: {request_info['device_model']}")
-        print(f"  🆔 ID: {request_info['device_id']}")
-        
-        print(f"\n{Colors.CYAN}🔑 Your Request Code:{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.GREEN}{request_code}{Colors.RESET}")
-        
-        print(f"\n{Colors.YELLOW}📤 Step 2: Send to Admin{Colors.RESET}")
-        print(f"  {Colors.DIM}Copy this request code:{Colors.RESET}")
-        print(f"  {Colors.DIM}Send to admin via WhatsApp/Telegram/Email{Colors.RESET}")
-        print(f"  {Colors.DIM}Wait for approval code{Colors.RESET}")
-        
-        print(f"\n{Colors.YELLOW}📥 Step 3: Enter Approval Code{Colors.RESET}")
-        print(f"{Colors.DIM}After admin adds you to Pastebin:{Colors.RESET}")
-        
-        approval_code = input(f"\n{Colors.GREEN}Enter approval code: {Colors.RESET}").strip().upper()
-        
-        if not approval_code:
-            print(f"{Colors.RED}❌ No code entered.{Colors.RESET}")
+            
+        elif status["status"] == "denied":
+            print(f"\n{Colors.RED}❌ {status['message']}{Colors.RESET}")
+            print(f"  🆔 Device: {status.get('device_model', 'Unknown')}")
+            print(f"  🔑 Request: {status.get('request_code', 'Unknown')}")
+            print(f"\n{Colors.YELLOW}📤 Send this request code to admin:{Colors.RESET}")
+            print(f"  {Colors.BOLD}{status['request_code']}{Colors.RESET}")
+            print(f"\n{Colors.DIM}Admin will add your device to Pastebin{Colors.RESET}")
             return False
-        
-        # Validate
-        result = self.validate_approval(request_code, approval_code)
-        
-        if result["status"] == "success":
-            print(f"\n{Colors.GREEN}{result['message']}{Colors.RESET}")
-            if result["data"].get("expiry_date"):
-                print(f"📅 Expires: {result['data']['expiry_date']}")
-            if result["data"].get("user_info"):
-                print(f"👤 User: {result['data']['user_info']}")
-            return True
+            
         else:
-            print(f"\n{Colors.RED}{result['message']}{Colors.RESET}")
+            print(f"\n{Colors.RED}❌ Unknown status{Colors.RESET}")
             return False
 
 
@@ -477,26 +383,24 @@ class PastebinLicenseManager:
 class AdminPastebinTool:
     def __init__(self, secret_word="naha"):
         self.secret_word = secret_word
+        self.pastebin_url = "https://pastebin.com/ez5BKAbT"
     
-    def generate_approval_code(self, request_code):
-        """Generate approval code from request code"""
+    def generate_approval_entry(self, request_code, device_id, device_model, 
+                                user_info, duration_days=30):
+        """Generate approval entry for Pastebin"""
+        # Generate approval code (optional, for future use)
         timestamp = datetime.now().strftime("%Y%m%d")
         raw_data = f"{request_code}|{self.secret_word}|{timestamp}"
         hash_obj = hashlib.sha256(raw_data.encode())
         hash_hex = hash_obj.hexdigest()
         approval_code = f"APP-{hash_hex[:12].upper()}"
-        return approval_code
-    
-    def generate_approval_entry(self, request_code, device_id, device_model, 
-                                user_info, duration_days=30):
-        """Generate approval entry for Pastebin"""
-        approval_code = self.generate_approval_code(request_code)
+        
         expiry_date = (datetime.now() + timedelta(days=duration_days)).strftime("%Y-%m-%d")
         
         # Plain text format for Pastebin
         entry_text = f"{request_code}|{approval_code}|{expiry_date}|{user_info}"
         
-        # JSON format (alternative)
+        # JSON format
         entry_json = {
             "request_code": request_code,
             "approval_code": approval_code,
@@ -509,11 +413,19 @@ class AdminPastebinTool:
         }
         
         return entry_text, entry_json
+    
+    def generate_pastebin_content(self, entries):
+        """Generate content for Pastebin"""
+        lines = []
+        for entry in entries:
+            line = f"{entry['request_code']}|{entry['approval_code']}|{entry['expiry_date']}|{entry['user_info']}"
+            lines.append(line)
+        return '\n'.join(lines)
 
 
 def admin_cli():
     print("="*60)
-    print(f"{Colors.CYAN}{Colors.BOLD}  🔐 Admin Approval Tool - Pastebin{Colors.RESET}")
+    print(f"{Colors.CYAN}{Colors.BOLD}  🔐 Admin Tool - Auto Approval System{Colors.RESET}")
     print("="*60)
     print(f"{Colors.DIM}Pastebin URL: https://pastebin.com/ez5BKAbT{Colors.RESET}")
     print("="*60)
@@ -524,23 +436,16 @@ def admin_cli():
     while True:
         print("\n" + "="*40)
         print("Options:")
-        print("1. Generate approval code only")
-        print("2. Create approval entry (full)")
-        print("3. Generate Pastebin content")
-        print("4. Show all entries")
-        print("5. Test license check")
-        print("6. Exit")
+        print("1. Add new device (create approval entry)")
+        print("2. Generate Pastebin content")
+        print("3. Show all entries")
+        print("4. Test check from Pastebin")
+        print("5. Exit")
         print("="*40)
         
         choice = input("\nEnter choice: ").strip()
         
         if choice == "1":
-            request_code = input("Enter request code: ").strip().upper()
-            approval_code = admin.generate_approval_code(request_code)
-            print(f"\n{Colors.GREEN}✅ Approval Code: {approval_code}{Colors.RESET}")
-            print(f"{Colors.YELLOW}📤 Send this to user{Colors.RESET}")
-        
-        elif choice == "2":
             print("\n📝 Enter user details:")
             request_code = input("Request Code: ").strip().upper()
             device_id = input("Device ID: ").strip()
@@ -554,32 +459,24 @@ def admin_cli():
             entries.append(entry_json)
             
             print(f"\n{Colors.GREEN}✅ Entry created!{Colors.RESET}")
-            print(f"🔑 Approval Code: {entry_json['approval_code']}")
-            print(f"📤 Send approval code to user")
-            print(f"\n{Colors.YELLOW}📋 Add this to Pastebin:{Colors.RESET}")
+            print(f"📋 Add this to Pastebin:{Colors.RESET}")
             print(f"{Colors.DIM}{entry_text}{Colors.RESET}")
-        
-        elif choice == "3":
+            
+        elif choice == "2":
             if not entries:
-                print(f"{Colors.YELLOW}⚠️ No entries yet. Create some first.{Colors.RESET}")
+                print(f"{Colors.YELLOW}⚠️ No entries yet.{Colors.RESET}")
                 continue
             
-            # Generate content
-            lines = []
-            for entry in entries:
-                line = f"{entry['request_code']}|{entry['approval_code']}|{entry['expiry_date']}|{entry['user_info']}"
-                lines.append(line)
-            
-            content = '\n'.join(lines)
+            content = admin.generate_pastebin_content(entries)
             
             print("\n" + "="*60)
             print(f"{Colors.CYAN}📄 PASTEBIN CONTENT{Colors.RESET}")
             print("="*60)
             print(content)
             print("="*60)
-            print(f"\n{Colors.YELLOW}📋 Copy this content to: https://pastebin.com/ez5BKAbT{Colors.RESET}")
-        
-        elif choice == "4":
+            print(f"\n{Colors.YELLOW}📋 Copy this to: https://pastebin.com/ez5BKAbT{Colors.RESET}")
+            
+        elif choice == "3":
             if not entries:
                 print(f"{Colors.YELLOW}⚠️ No entries yet.{Colors.RESET}")
                 continue
@@ -588,23 +485,24 @@ def admin_cli():
             for i, entry in enumerate(entries, 1):
                 print(f"\n{i}. {entry['user_info']}")
                 print(f"   Request: {entry['request_code']}")
-                print(f"   Approval: {entry['approval_code']}")
-                print(f"   Expires: {entry['expiry_date']}")
                 print(f"   Device: {entry.get('device_model', 'Unknown')}")
-        
-        elif choice == "5":
-            print("\n🔍 Testing license check...")
-            test_manager = PastebinLicenseManager()
+                print(f"   Expires: {entry['expiry_date']}")
+                print(f"   Status: {entry['status']}")
+                
+        elif choice == "4":
+            print("\n🔍 Testing Pastebin check...")
+            test_manager = AutoLicenseManager()
             test_code = input("Enter request code to check: ").strip().upper()
-            result = test_manager.check_pastebin_approval(test_code)
+            result = test_manager.check_pastebin(test_code)
             if result:
                 print(f"{Colors.GREEN}✅ Found in Pastebin!{Colors.RESET}")
                 print(json.dumps(result, indent=2))
+                print(f"\n{Colors.DIM}User will be automatically approved{Colors.RESET}")
             else:
                 print(f"{Colors.RED}❌ Not found in Pastebin{Colors.RESET}")
-                print(f"{Colors.YELLOW}Make sure the content is at: {test_manager.pastebin_url}{Colors.RESET}")
-        
-        elif choice == "6":
+                print(f"{Colors.YELLOW}Add this request code using option 1{Colors.RESET}")
+                
+        elif choice == "5":
             print("Goodbye!")
             break
         else:
@@ -618,40 +516,39 @@ def admin_cli():
 def main():
     """Main entry point"""
     print("\n" + "="*60)
-    print(f"{Colors.CYAN}{Colors.BOLD}  IntraMirror License System - Demo{Colors.RESET}")
+    print(f"{Colors.CYAN}{Colors.BOLD}  IntraMirror OTP Sender{Colors.RESET}")
     print("="*60)
     
     # Initialize license manager
-    license_manager = PastebinLicenseManager(secret_word="naha")
+    license_manager = AutoLicenseManager(secret_word="naha")
     
-    # Show device info
-    print(f"\n{Colors.DIM}Device Info:{Colors.RESET}")
-    print(f"  ID: {license_manager.get_device_id()}")
-    print(f"  Model: {license_manager.get_device_model()}")
-    
-    # Check license flow
-    if not license_manager.request_approval_flow():
-        print(f"\n{Colors.RED}❌ Cannot continue without valid license{Colors.RESET}")
-        print(f"{Colors.YELLOW}Please contact admin to get approval.{Colors.RESET}")
+    # Display license status
+    if not license_manager.display_status():
+        print(f"\n{Colors.RED}❌ Access Denied{Colors.RESET}")
+        print(f"{Colors.YELLOW}Contact admin to get approved.{Colors.RESET}")
         return
     
     # ============================================
     # YOUR MAIN TOOL CODE HERE
     # ============================================
-    print(f"\n{Colors.GREEN}{Colors.BOLD}✅ License Verified! Running tool...{Colors.RESET}")
-    print(f"{Colors.DIM}This is where your OTP sender logic would go{Colors.RESET}")
+    print(f"\n{Colors.GREEN}{Colors.BOLD}🎉 Access Granted! Running tool...{Colors.RESET}")
     
     # Show license info
-    license_data = license_manager.load_license()
-    if license_data:
-        print(f"\n{Colors.CYAN}📋 License Info:{Colors.RESET}")
-        print(f"  User: {license_data.get('user_info', 'Unknown')}")
-        print(f"  Device: {license_data.get('device_model', 'Unknown')}")
-        print(f"  Device ID: {license_data.get('device_id', 'Unknown')}")
-        if license_data.get('expiry_date'):
-            print(f"  Expires: {license_data['expiry_date']}")
+    status = license_manager.get_license_status()
+    print(f"\n{Colors.CYAN}📋 License Info:{Colors.RESET}")
+    print(f"  User: {status.get('user_info', 'Unknown')}")
+    print(f"  Device: {status.get('device_model', 'Unknown')}")
+    if status.get('remaining_days') is not None:
+        print(f"  Remaining: {status['remaining_days']} days")
+    if status.get('expiry_date'):
+        print(f"  Expires: {status['expiry_date']}")
     
-    print(f"\n{Colors.GREEN}🎉 Tool ready to use!{Colors.RESET}")
+    # ============================================
+    # YOUR ACTUAL OTP SENDER CODE HERE
+    # ============================================
+    
+    print(f"\n{Colors.GREEN}✅ Tool ready!{Colors.RESET}")
+    # ... your OTP sending code ...
 
 
 if __name__ == "__main__":
