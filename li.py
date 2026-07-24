@@ -33,7 +33,6 @@ class NXLicense:
         self.tool_name = tool_name
         self.secret_word = secret_word
         self.server_url = server_url.rstrip('/')
-        # No caching - we always check the server
 
     def get_device_id(self):
         """Get unique device ID - PERMANENT for this device"""
@@ -169,11 +168,16 @@ class NXLicense:
         }
 
     def check_server(self, request_code):
-        """Check license status against your POWER server's /api/check endpoint"""
+        """
+        Check license status against your POWER server's /api/check endpoint.
+        Uses query parameters (params=) because FastAPI expects them in the URL.
+        """
         try:
+            # IMPORTANT: Use params= for query parameters, NOT data=
+            # The server expects: /api/check?tool_name=XXX&request_code=YYY
             response = requests.post(
                 f"{self.server_url}/api/check",
-                data={  # Use form data (FastAPI expects this)
+                params={  # Query parameters in the URL
                     "tool_name": self.tool_name,
                     "request_code": request_code
                 },
