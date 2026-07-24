@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 NXTools License System - Self-Hosted Version
-Checks against your own POWER server instead of Pastebin.
-No private information shown to user.
+ALWAYS checks your POWER server. No Pastebin. No caching.
 """
 
 import hashlib
@@ -30,19 +29,15 @@ class NXLicense:
                  server_url="http://153.75.248.106:8000"):
         """
         server_url: your POWER server's base URL.
-          Currently set to: http://153.75.248.106:8000
-          (no trailing slash)
         """
         self.tool_name = tool_name
         self.secret_word = secret_word
         self.server_url = server_url.rstrip('/')
-        self.license_file = os.path.expanduser(f"~/.{tool_name}_license.json")
-        self.license_data = None
-        self.load_license()
+        # No caching - we always check the server
 
     def get_device_id(self):
         """Get unique device ID - PERMANENT for this device"""
-        # Method 1: Android ID (for Termux/Android)
+        # Method 1: Android ID (Termux/Android)
         try:
             result = subprocess.run(
                 ['content', 'query', '--uri', 'content://settings/secure',
@@ -174,11 +169,11 @@ class NXLicense:
         }
 
     def check_server(self, request_code):
-        """Check license status against your own POWER server's /api/check endpoint"""
+        """Check license status against your POWER server's /api/check endpoint"""
         try:
             response = requests.post(
                 f"{self.server_url}/api/check",
-                data={  # Use data= for form data (FastAPI expects this)
+                data={  # Use form data (FastAPI expects this)
                     "tool_name": self.tool_name,
                     "request_code": request_code
                 },
@@ -188,7 +183,7 @@ class NXLicense:
             if response.status_code != 200:
                 return {
                     "status": "error",
-                    "message": f"Server returned {response.status_code}"
+                    "message": f"Server error: {response.status_code}"
                 }
             
             return response.json()
@@ -210,47 +205,14 @@ class NXLicense:
             }
 
     def check(self):
-        """Check license status - generates key and checks your server"""
+        """
+        Check license status - generates key and checks your server.
+        ALWAYS checks the server - NO CACHING.
+        """
         key_info = self.generate_key()
         request_code = key_info["request_code"]
 
-        # Check local cache first (avoids a network call every single run)
-        if self.license_data and self.license_data.get("status") == "active":
-            if self.license_data.get("device_id") == key_info["device_id"]:
-                expiry = self.license_data.get("expiry_date")
-                if expiry:
-                    try:
-                        expiry_date = datetime.fromisoformat(expiry)
-                        if datetime.now() > expiry_date:
-                            # Cached copy says expired locally; fall through to
-                            # re-check the server in case it was renewed.
-                            pass
-                        else:
-                            remaining = (expiry_date - datetime.now()).days
-                            return {
-                                "status": "active",
-                                "message": "License valid (cached)",
-                                "request_code": request_code,
-                                "user_info": self.license_data.get("user_info"),
-                                "expiry_date": expiry,
-                                "remaining_days": remaining,
-                                "cached": True
-                            }
-                    except:
-                        pass
-                else:
-                    # Lifetime license, cached
-                    return {
-                        "status": "active",
-                        "message": "License valid (cached, lifetime)",
-                        "request_code": request_code,
-                        "user_info": self.license_data.get("user_info"),
-                        "expiry_date": None,
-                        "remaining_days": None,
-                        "cached": True
-                    }
-
-        # Check your server
+        # ALWAYS check the server (no caching)
         server_data = self.check_server(request_code)
 
         if server_data is None:
@@ -273,7 +235,9 @@ class NXLicense:
             return {
                 "status": "denied",
                 "message": "Not approved yet",
-                "request_code": request_code
+                "request_code": request_code,
+                "device_id": key_info["device_id"],
+                "device_model": key_info["device_model"]
             }
 
         if status == "expired":
@@ -301,27 +265,13 @@ class NXLicense:
                 except:
                     remaining = None
 
-            # Save license locally so we don't hit the server every run
-            license_data = {
-                "tool_name": self.tool_name,
-                "request_code": request_code,
-                "device_id": key_info["device_id"],
-                "device_model": key_info["device_model"],
-                "user_info": server_data.get("owner"),
-                "expiry_date": expiry_date,
-                "activated_date": datetime.now().isoformat(),
-                "status": "active"
-            }
-            self.save_license(license_data)
-
             return {
                 "status": "active",
                 "message": "✅ License approved!",
                 "request_code": request_code,
                 "user_info": server_data.get("owner"),
                 "expiry_date": expiry_date,
-                "remaining_days": remaining,
-                "cached": False
+                "remaining_days": remaining
             }
 
         return {
@@ -329,27 +279,6 @@ class NXLicense:
             "message": "Unknown status from server",
             "request_code": request_code
         }
-
-    def save_license(self, license_data):
-        """Save license locally"""
-        try:
-            with open(self.license_file, 'w') as f:
-                json.dump(license_data, f, indent=2)
-        except:
-            pass
-
-    def load_license(self):
-        """Load existing license"""
-        if os.path.exists(self.license_file):
-            try:
-                with open(self.license_file, 'r') as f:
-                    self.license_data = json.load(f)
-                return self.license_data
-            except:
-                self.license_data = None
-                return None
-        self.license_data = None
-        return None
 
     def require(self):
         """Main function - check license and show status"""
@@ -367,14 +296,14 @@ class NXLicense:
                 print(f"  {Colors.DIM}Remaining:{Colors.RESET} {result['remaining_days']} days")
             if result.get("expiry_date"):
                 print(f"  {Colors.DIM}Expires:{Colors.RESET}  {result['expiry_date']}")
-            if result.get("cached"):
-                print(f"  {Colors.DIM}Status:{Colors.RESET}   {Colors.YELLOW}Cached (offline){Colors.RESET}")
             print("="*60)
             print(f"{Colors.GREEN}🎉 Access Granted!{Colors.RESET}")
             return True
 
         elif result["status"] == "expired":
             print(f"{Colors.RED}❌ {result['message']}{Colors.RESET}")
+            if result.get("expiry_date"):
+                print(f"  {Colors.DIM}Expired on:{Colors.RESET} {result['expiry_date']}")
             print("="*60)
             print(f"{Colors.YELLOW}💡 Contact admin for extension{Colors.RESET}")
             return False
@@ -383,6 +312,10 @@ class NXLicense:
             print(f"{Colors.RED}❌ {result['message']}{Colors.RESET}")
             print(f"\n{Colors.YELLOW}📤 Send this request code to admin:{Colors.RESET}")
             print(f"  {Colors.BOLD}{Colors.CYAN}{result['request_code']}{Colors.RESET}")
+            if result.get("device_id"):
+                print(f"\n  {Colors.DIM}Device ID:{Colors.RESET}   {result['device_id'][:20]}...")
+            if result.get("device_model"):
+                print(f"  {Colors.DIM}Device Model:{Colors.RESET} {result['device_model']}")
             print(f"\n{Colors.DIM}Admin will issue your license on the POWER dashboard{Colors.RESET}")
             print("="*60)
             return False
@@ -390,6 +323,8 @@ class NXLicense:
         elif result["status"] == "error":
             print(f"{Colors.RED}❌ {result['message']}{Colors.RESET}")
             print("="*60)
+            print(f"{Colors.YELLOW}💡 Check your internet connection and server status{Colors.RESET}")
+            print(f"   {Colors.DIM}Server: {self.server_url}{Colors.RESET}")
             return False
 
         else:
@@ -423,21 +358,23 @@ if __name__ == "__main__":
     TOOL_NAME = "intramirror"  # Change to your tool name
 
     print("\n" + "="*50)
-    print(f"{Colors.BOLD}POWER License Check{Colors.RESET}")
+    print(f"{Colors.BOLD}POWER License System{Colors.RESET}")
     print("="*50)
     
-    # Generate request code
+    # Generate and show request code
     license = NXLicense(tool_name=TOOL_NAME, server_url=SERVER_URL)
     key_info = license.generate_key()
+    
+    print(f"\n{Colors.DIM}Tool:{Colors.RESET}       {TOOL_NAME}")
+    print(f"{Colors.DIM}Server:{Colors.RESET}     {SERVER_URL}")
+    print(f"{Colors.DIM}Device:{Colors.RESET}     {key_info['device_model']}")
     print(f"\n{Colors.YELLOW}Your Request Code:{Colors.RESET}")
     print(f"  {Colors.CYAN}{Colors.BOLD}{key_info['request_code']}{Colors.RESET}")
-    print(f"\n{Colors.DIM}Device ID:{Colors.RESET} {key_info['device_id'][:20]}...")
-    print(f"{Colors.DIM}Device Model:{Colors.RESET} {key_info['device_model']}")
     
     print("\n" + "="*50)
     
     # Check license
-    if require_license(TOOL_NAME, server_url=SERVER_URL):
+    if license.require():
         print("\n✅ Tool is ready to use!")
         sys.exit(0)
     else:
